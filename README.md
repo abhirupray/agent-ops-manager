@@ -29,6 +29,17 @@ real run:
 
 ![Audit trail](docs/screenshots/audit-trail.png)
 
+**Interactive API docs** — every endpoint requires authentication except
+`/health` (note the lock icons); FastAPI generates this automatically from the
+typed request/response models in the code:
+
+![API docs](docs/screenshots/api-docs.png)
+
+**Assigning a task from the dashboard** — the same `POST /tasks/assign` flow
+available through the UI, for demoing without touching the API directly:
+
+![Assign a task](docs/screenshots/assign-task.png)
+
 ## Why this exists
 
 Multiple 2026 enterprise AI surveys converge on the same finding: the blocker on
