@@ -10,7 +10,7 @@ capped. Risky actions need sign-off until an agent has proven itself. Every
 decision — every task assignment, every approval, every promotion or demotion — is
 logged to an audit trail.
 
-This is Phase 2 of a two-part project. [Phase 1](../escalation-agent) is a real
+This is Phase 2 of a two-part project. [Phase 1](https://github.com/abhirupray/escalation-agent) is a real
 agent (Jira ticket + meeting-transcript triage) that this repo governs — over a
 real network call, as an independently running service (see DECISIONS.md).
 
