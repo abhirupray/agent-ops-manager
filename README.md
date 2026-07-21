@@ -1,5 +1,9 @@
 # Agent Ops Manager
 
+![CI](https://github.com/abhirupray/agent-ops-manager/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
 Supervises AI agents the way an engineering manager supervises a team: autonomy is
 **earned** through demonstrated performance, not assumed. Work-in-progress is
 capped. Risky actions need sign-off until an agent has proven itself. Every
@@ -7,8 +11,23 @@ decision — every task assignment, every approval, every promotion or demotion 
 logged to an audit trail.
 
 This is Phase 2 of a two-part project. [Phase 1](../escalation-agent) is a real
-agent (Jira ticket + meeting-transcript triage); this repo is the governance layer
-that supervises it — or any other agent that implements the same simple interface.
+agent (Jira ticket + meeting-transcript triage) that this repo governs — over a
+real network call, as an independently running service (see DECISIONS.md).
+
+## Screenshots
+
+**Live roster** — the real escalation agent, registered and supervised alongside
+demo agents, after a real governed run (1 completed task, 0.90 quality score):
+
+![Agent roster](docs/screenshots/roster.png)
+
+**Full audit trail** for that same agent — every step from assignment through
+human approval to completion, timestamped. Note the second `AGENT_REGISTERED`
+entry showing `hydrated_from_persistence: True` — proof the agent's earned
+autonomy and history survived a process restart, not just in tests but in a
+real run:
+
+![Audit trail](docs/screenshots/audit-trail.png)
 
 ## Why this exists
 
