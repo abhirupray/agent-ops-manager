@@ -4,116 +4,84 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-Supervises AI agents the way an engineering manager supervises a team: autonomy is
-**earned** through demonstrated performance, not assumed. Work-in-progress is
-capped. Risky actions need sign-off until an agent has proven itself. Every
-decision — every task assignment, every approval, every promotion or demotion — is
-logged to an audit trail.
+This project supervises AI agents the way a manager supervises a new team member. An agent does not get full trust on day one. It earns more freedom over time by doing good work. Until then, its work is capped and risky actions need a human's sign-off. Every decision the system makes (assigning work, approving something, promoting or demoting an agent) gets written to an audit log, so you can always see what happened and why.
 
-This is Phase 2 of a two-part project. [Phase 1](https://github.com/abhirupray/escalation-agent) is a real
-agent (Jira ticket + meeting-transcript triage) that this repo governs — over a
-real network call, as an independently running service (see DECISIONS.md).
+This is Phase 2 of a two-part project. [Phase 1](https://github.com/abhirupray/escalation-agent) is a real agent that reads Jira tickets and meeting notes. This repo is the layer that supervises it, calling it over a real network connection, not just importing its code.
 
 ## Screenshots
 
-**Live roster** — the real escalation agent, registered and supervised alongside
-demo agents, after a real governed run (1 completed task, 0.90 quality score):
+**Live roster.** The real escalation agent, registered next to two demo agents, after a real run (1 completed task, 0.90 quality score):
 
 ![Agent roster](docs/screenshots/roster.png)
 
-**Full audit trail** for that same agent — every step from assignment through
-human approval to completion, timestamped. Note the second `AGENT_REGISTERED`
-entry showing `hydrated_from_persistence: True` — proof the agent's earned
-autonomy and history survived a process restart, not just in tests but in a
-real run:
+**Full audit trail** for that same agent, from assignment to human approval to completion, all timestamped. Look at the second `AGENT_REGISTERED` entry: it shows `hydrated_from_persistence: True`, which means the agent's earned trust and history survived a restart. That was proven in a real run, not just in a test:
 
 ![Audit trail](docs/screenshots/audit-trail.png)
 
-**Interactive API docs** — every endpoint requires authentication except
-`/health` (note the lock icons); FastAPI generates this automatically from the
-typed request/response models in the code:
+**API docs.** Every endpoint needs authentication except `/health` (see the lock icons). FastAPI builds this page automatically from the code:
 
 ![API docs](docs/screenshots/api-docs.png)
 
-**Assigning a task from the dashboard** — the same `POST /tasks/assign` flow
-available through the UI, for demoing without touching the API directly:
+**Assigning a task from the dashboard.** The same task-assignment flow that exists in the API, available through a simple UI:
 
 ![Assign a task](docs/screenshots/assign-task.png)
 
-## Why this exists
+## Why I built this
 
-Multiple 2026 enterprise AI surveys converge on the same finding: the blocker on
-AI agent adoption isn't capability, it's trust and governance. 88% of agent pilots
-never reach production. Over a third of companies say they couldn't immediately
-"pull the plug" on a misbehaving agent. The idea of managing AI agents with the
-same discipline you'd apply to a new hire — defined scope, a definition of done,
-earned autonomy, an escalation path — has started showing up as engineering-
-leadership thought leadership in 2026. This repo is a working implementation of
-that idea, not just a description of it (see [DECISIONS.md](DECISIONS.md) for the
-full reasoning behind every design choice, including this one).
+A few 2026 surveys on enterprise AI adoption point to the same problem: most AI agent pilots never make it to production, and it is usually not because the agent is not smart enough. It is because nobody trusts it enough to give it real responsibility. Some companies have said they could not even switch an agent off quickly if it started misbehaving.
 
-## Architecture
+There is a simple idea that keeps coming up in engineering-leadership writing: manage an AI agent the way you would manage a new hire. Give it a clear scope, a clear definition of "done," and let it earn more autonomy as it proves itself. I had not seen this built as actual working software, so I built it. It is not a new idea. What I am contributing is a working version of it, along with the reasoning behind every choice, written down in [DECISIONS.md](DECISIONS.md).
+
+## How it works
 
 ```
-                        ┌─────────────────────┐
-   Task submitted  ───▶ │                      │
-                        │      Supervisor       │
-                        │  (src/core/supervisor)│
-                        └──────────┬────────────┘
-                                   │
-              ┌────────────────────┼────────────────────┐
-              ▼                    ▼                     ▼
-      WIP limit check      Autonomy check          Audit log
-      (per agent cap)      (pre-approval needed?)  (every decision,
-                                   │                 append-only)
-                    ┌──────────────┴──────────────┐
-                    ▼                              ▼
-            Runs immediately              Queued for human approval
-                    │                              │
-                    ▼                    (approve) ▼  (reject)
-            ┌───────────────┐          Runs immediately   Task rejected
-            │  Worker agent  │
-            │ (any AgentWorker)
-            └───────┬────────┘
-                    ▼
-            Quality checker scores the output
-            against the task's definition_of_done
-                    │
-        ┌────────────┴────────────┐
-        ▼                          ▼
-  Updates rolling quality    Low score at ANY autonomy
-  history → may trigger      level still escalates for
-  promotion/demotion          human review, post-hoc
-  (every 5 completed tasks)
+                      ┌─────────────────────┐
+ Task submitted  ───▶ │                      │
+                      │      Supervisor       │
+                      │  (src/core/supervisor)│
+                      └──────────┬────────────┘
+                                 │
+            ┌────────────────────┼────────────────────┐
+            ▼                    ▼                     ▼
+    WIP limit check      Autonomy check          Audit log
+    (per agent cap)      (pre-approval needed?)  (every decision,
+                                 │                 append-only)
+                  ┌──────────────┴──────────────┐
+                  ▼                              ▼
+          Runs immediately              Queued for human approval
+                  │                              │
+                  ▼                    (approve) ▼  (reject)
+          ┌───────────────┐          Runs immediately   Task rejected
+          │  Worker agent  │
+          │ (any AgentWorker)
+          └───────┬────────┘
+                  ▼
+          Quality checker scores the output
+          against the task's definition_of_done
+                  │
+      ┌────────────┴────────────┐
+      ▼                          ▼
+Updates rolling quality    A low score at ANY autonomy
+history, may trigger        level still gets flagged for
+promotion or demotion       human review, after the fact
+(every 5 completed tasks)
 ```
 
 **The autonomy ladder:**
 
-| Level | Meaning |
-|---|---|
-| L0 | Every task requires human approval before execution |
-| L1 | Low/medium-risk tasks run automatically; high-risk still needs approval |
-| L2 | Agent acts autonomously; every result is reviewed after the fact |
-| L3 | Agent acts autonomously; only a sample of results is audited |
-| L4 | Fully autonomous; audit only triggers on anomaly/escalation |
+| Level | What it means |
+| ----- | ----------------------------------------------------------------------- |
+| L0    | Every task needs human approval first |
+| L1    | Low and medium risk tasks run on their own; high risk still needs approval |
+| L2    | Agent works on its own; every result gets reviewed afterward |
+| L3    | Agent works on its own; only a sample of results gets checked |
+| L4    | Fully independent; only checked if something looks wrong |
 
-Agents start at a low level and are promoted or demoted every 5 completed tasks
-based on their rolling average quality score — see [DECISIONS.md](DECISIONS.md)
-for why it's a periodic cycle rather than a per-task adjustment.
+Agents start low on this ladder. Every 5 completed tasks, the system looks at their average quality score and decides whether to move them up or down. DECISIONS.md explains why this happens on a schedule instead of after every single task.
 
-**Trust-based routing:** instead of the caller picking an agent,
-`supervisor.route_task(task)` staffs the work — it selects the most-trusted
-eligible agent (scoped, unpaused, WIP headroom) for the task type. New agents get
-an optimism prior so they aren't starved of work before they have a track record
-(`src/core/router.py`).
+**Trust-based routing.** Instead of picking which agent gets a task yourself, `supervisor.route_task(task)` can do it for you. It picks the most trusted agent that is free and scoped for the job. New agents get a small benefit of the doubt at first, so they are not stuck waiting for work while they build a track record (`src/core/router.py`).
 
-**Human feedback loop:** `supervisor.record_human_feedback(task_id, corrected_score, note)`
-lets a reviewer override an automated quality score. The correction replaces the
-automated score in the agent's rolling trust history — so autonomy and routing end
-up shaped by human judgment, not just the automated checker, and every correction
-is in the audit trail (`src/core/feedback.py`). This is system-level learning
-through interaction: the models stay stateless; the supervision gets better
-calibrated with use.
+**Human feedback.** If a person disagrees with an automated quality score, `supervisor.record_human_feedback(task_id, corrected_score, note)` lets them correct it. That correction becomes part of the agent's trust history from then on, and it is logged too (`src/core/feedback.py`). This is one honest way a system like this can improve with use: the model itself does not change, but the supervision around it gets better calibrated.
 
 ## Setup
 
@@ -125,20 +93,16 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-No API key is required to run the tests, the demo script, or the dashboard against
-the built-in demo agents — see below. An API key is only needed to register the
-real Phase 1 escalation agent, or to use `LLMQualityChecker` instead of the default
-heuristic scorer.
+You do not need an API key to run the tests, the demo script, or the dashboard with the built-in demo agents. You only need one if you want to connect the real Phase 1 agent, or if you want to use `LLMQualityChecker` instead of the simpler default scorer.
 
 ## Usage
 
-**Run the tests** (no API key needed — all core logic is deterministic)
+**Run the tests** (no API key needed, everything here is deterministic)
 ```bash
 pytest tests/ -v
 ```
 
-**Watch the full system run in one scripted demo** (promotion, demotion,
-escalation, and the kill switch, in order — good for a recorded walkthrough)
+**Watch the whole system run in one scripted demo** (promotion, demotion, escalation, and the kill switch, in that order)
 ```bash
 python -m demo.run_demo
 ```
@@ -155,51 +119,41 @@ uvicorn src.api.main:app --reload
 # POST http://localhost:8000/tasks/assign
 # GET  http://localhost:8000/escalations
 # POST http://localhost:8000/escalations/{task_id}/approve
-# POST http://localhost:8000/agents/{agent_id}/pause   <- kill switch
+# POST http://localhost:8000/agents/{agent_id}/pause   <- the kill switch
 ```
 
-**Docker (API + dashboard together)**
+**Docker (API and dashboard together)**
 ```bash
 docker compose up --build
 ```
 
 ## Connecting the real escalation-agent service
 
-As of v2.1, this is a real two-service setup: escalation-agent runs as its own
-independent API, and this repo calls it over HTTP (see DECISIONS.md for why
-this replaced an earlier direct-import approach, and what that approach cost).
-Both services need to actually be running, in two separate terminals, each in
-its own venv:
+As of v2.1, this is a genuine two-service setup. escalation-agent runs as its own API, and this repo talks to it over HTTP (DECISIONS.md explains why I moved away from an earlier approach that imported its code directly, and what that cost). Both services need to be running at the same time, each in its own terminal and its own virtual environment:
 
-**Terminal 1 — escalation-agent:**
+**Terminal 1, escalation-agent:**
 ```bash
 cd escalation-agent
-source venv/bin/activate      # its own venv, its own dependencies
+source venv/bin/activate
 uvicorn src.api.main:app --port 8001
 ```
 
-**Terminal 2 — agent-ops-manager:**
+**Terminal 2, agent-ops-manager:**
 ```bash
 cd agent-ops-manager
 source venv/bin/activate
-# .env: ESCALATION_AGENT_URL=http://localhost:8001 (this is the default, only
-# needed if escalation-agent runs somewhere else). If escalation-agent has
-# ESCALATION_AGENT_API_KEY set, set the same value here too.
+# In .env: ESCALATION_AGENT_URL=http://localhost:8001 (this is already the
+# default, so you only need to set it if escalation-agent runs somewhere
+# else). If escalation-agent has ESCALATION_AGENT_API_KEY set, set the same
+# value here too.
 python scripts/run_governed_triage.py
 ```
 
-This script pulls every open ticket dynamically from escalation-agent's live
-`/tickets` endpoint (nothing hardcoded) and runs each one through the real
-agent, governed by this supervisor: WIP limits, the autonomy ladder,
-human-approval gating on high-risk tickets, quality scoring, and the audit
-trail all apply. Add `--auto-approve` for a hands-off run.
+This script pulls every open ticket straight from escalation-agent's live `/tickets` endpoint. Nothing is hardcoded. Each ticket then goes through this supervisor, so WIP limits, the autonomy ladder, approval gates on risky tickets, quality scoring, and the audit trail all apply. Add `--auto-approve` if you want it to run without stopping for approvals.
 
-The bootstrap module (`src/bootstrap.py`) health-checks escalation-agent at
-startup and registers it as `jira-escalation-agent`, scoped to `ticket_triage`
-tasks, starting at autonomy level L1 -- only if it's actually reachable.
-Demo agents work regardless of whether escalation-agent is running.
+The bootstrap module (`src/bootstrap.py`) checks whether escalation-agent is reachable when it starts up, and only registers it as `jira-escalation-agent` if it is. It starts at autonomy level L1. The demo agents work fine either way.
 
-To call it directly instead of via the script:
+To call it directly instead of through the script:
 ```python
 from src.bootstrap import get_supervisor
 from src.integrations.escalation_agent_http_worker import make_ticket_triage_task
@@ -212,16 +166,10 @@ result = supervisor.assign_task("jira-escalation-agent", task)
 
 ## Writing your own worker agent
 
-Any object with a `.run(task: Task) -> Any` method can be supervised — see
-`src/core/worker.py` for the (deliberately minimal) protocol, and
-`src/integrations/demo_worker.py` for the simplest possible examples.
+Any object with a `.run(task: Task) -> Any` method can be supervised. See `src/core/worker.py` for the interface, which is kept as small as possible, and `src/integrations/demo_worker.py` for the simplest examples.
 
-## Extending this for a real deployment
+## Ideas for taking this further
 
-1. Swap `HeuristicQualityChecker` for `LLMQualityChecker` (or your own) once you
-   want real quality judgments, not just shape-checks.
-2. Swap SQLite for a tamper-evident audit store if this needs to satisfy real
-   compliance requirements (see DECISIONS.md).
-3. Add true mid-execution cancellation to the kill switch if agents run
-   asynchronously in your deployment (see DECISIONS.md for the current, stated
-   limitation).
+1. Swap `HeuristicQualityChecker` for `LLMQualityChecker` (or your own) when you want real judgment on quality, not just a shape check.
+2. Swap SQLite for a tamper-evident audit store if this ever needs to meet real compliance requirements (see DECISIONS.md).
+3. Add real mid-task cancellation to the kill switch if agents run asynchronously in your setup (this is a known, stated gap right now, see DECISIONS.md).

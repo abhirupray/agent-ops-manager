@@ -1,237 +1,78 @@
 # Engineering Decisions
 
-## Four real bugs found during manual verification (before you assume anything works, verify it)
+This file explains the choices behind this project that are not obvious just from reading the code. I would rather write them down than leave you guessing why something was built a certain way.
 
-**1. `.env` was never actually loaded.** `python-dotenv` was a listed dependency
-in both repos, but the code never called `load_dotenv()` -- so a correctly
-filled `.env` file was silently ignored by plain `python` invocations (some
-IDEs auto-load `.env` and masked this during earlier testing). Fixed by calling
-`load_dotenv()` in `src/bootstrap.py` (the single entry point everything else --
-API, dashboard, REPL -- goes through) and in escalation-agent's `src/config.py`.
+## Four real bugs I found while testing this myself
 
-**2. A `src`/`src` namespace collision broke the cross-repo integration.** Both
-repos have a top-level package literally named `src`. `escalation_agent_adapter.py`
-originally did `sys.path.insert(...)` then `from src.agent import assess_ticket`
--- but by the time that runs, THIS process has already imported ITS OWN `src`
-package. Python finds `src` already in `sys.modules` and reuses it; it does not
-re-search `sys.path` for a second, different package of the same name. Result:
-`ModuleNotFoundError: No module named 'src.agent'`, even with escalation-agent
-correctly present as a sibling directory. This is a real, non-obvious Python
-import-system behavior, not a typo.
+**1. `.env` was never actually being loaded.** `python-dotenv` was listed as a dependency in both repos, but the code never called `load_dotenv()`. So a correctly filled `.env` file was quietly ignored by plain `python` commands. Some IDEs load `.env` files automatically, which hid this problem during earlier testing. I fixed it by calling `load_dotenv()` in `src/bootstrap.py` (which everything else, the API, the dashboard, the REPL, goes through) and in escalation-agent's `src/config.py`.
 
-Fix: `escalation_agent_adapter.py` now loads escalation-agent's `src` package
-under a distinct name (`escalation_agent_src`) using `importlib.util`, so both
-same-named packages coexist in one process without colliding. Regression tests
-in `tests/test_escalation_agent_integration.py` prove the import succeeds --
-and skip gracefully (not fail) in CI, where only this repo is checked out and
-the sibling genuinely isn't present.
+**2. Both repos had a folder named `src`, and that broke the connection between them.** `escalation_agent_adapter.py` used to add escalation-agent's folder to `sys.path` and then run `from src.agent import assess_ticket`. The problem is that by the time this code runs, this process has already loaded its own `src` package. Python sees `src` is already loaded and reuses it, instead of searching for a second, different package with the same name. The result was `ModuleNotFoundError: No module named 'src.agent'`, even with escalation-agent sitting right there as a sibling folder. This was a real, slightly surprising quirk of how Python imports work, not a typo on my part.
 
-**3. Missing cross-repo dependencies gave a confusing raw traceback.** Each
-repo has its own venv with only its own dependencies. When agent-ops-manager's
-adapter loads escalation-agent's real code, that code needs escalation-agent's
-dependencies (`langgraph`, `langchain-anthropic`, `chromadb`, etc.) installed
-in agent-ops-manager's venv too, since agent-ops-manager's process is the one
-executing it. The original failure mode was a raw `ModuleNotFoundError` several
-frames deep in someone else's code -- correct, but not actionable at a glance.
-Fixed: the adapter now catches this specific case and re-raises with the exact
-fix (`pip install -r <path-to-escalation-agent>/requirements.txt`) in the
-message. The regression test for this needed its own fix mid-development too:
-an early version mutated global `sys.modules` state and leaked a corrupted
-cache into the next test in the file -- a reminder that tests exercising
-process-global state (module caches, singletons) need explicit save/restore,
-not just a mock and an assertion.
+I fixed it by loading escalation-agent's `src` package under a different internal name (`escalation_agent_src`) using `importlib.util`, so the two same-named packages can exist in one process without clashing. The tests in `tests/test_escalation_agent_integration.py` check that this import actually works, and they skip cleanly (instead of failing) in CI, where only this one repo is checked out and the sibling repo genuinely is not there.
 
-**The broader lesson, worth stating in an interview:** two independently-built
-Python repos sharing a package name is a landmine that only surfaces at
-integration time -- unit tests in each repo alone will never catch it, because
-each repo only ever imports its own `src`. This is exactly the class of bug
-that manual, cross-system verification exists to catch, and exactly the
-argument for not skipping it before a GitHub push.
+**3. Missing dependencies from the other repo gave a confusing error.** Each repo has its own virtual environment with only its own dependencies installed. When agent-ops-manager's adapter loaded escalation-agent's real code, that code needed escalation-agent's own dependencies (`langgraph`, `langchain-anthropic`, `chromadb`, and so on) to also be present in agent-ops-manager's environment, since agent-ops-manager's process was the one actually running it. The original error was just a raw `ModuleNotFoundError` buried a few layers deep, which is correct but not very helpful at a glance. I fixed this by catching that specific case and re-raising it with the actual fix in the message (`pip install -r <path>/requirements.txt`). The test for this needed its own small fix along the way too: an early version of it left some global state behind that leaked into the next test in the file. That was a good reminder that tests touching shared state, like module caches or singletons, need to clean up after themselves properly.
 
+**The lesson worth remembering:** two Python projects that happen to share a folder name is the kind of problem that only shows up once you try to run them together. Neither repo's own tests would ever catch it, since each one only ever imports its own `src`. This is exactly why testing the whole system together matters, not just testing each piece on its own.
 
-**4. SQLite connections weren't closing (Windows-only symptom).** Found while
-running `demo/run_demo.py` on Windows: the script's own cleanup step
-(`os.remove(db_path)`) failed with `PermissionError: ... being used by another
-process`. Root cause: `AuditLog` and `StateStore` used
-`with sqlite3.connect(...) as conn:` throughout. That pattern is a common trap --
-Python's sqlite3 connection context manager **commits or rolls back the
-transaction on exit, but does not close the connection**. The connection stayed
-open until garbage collected, which held a file lock. POSIX (Mac/Linux) allows
-deleting a file that's still open elsewhere, so this was invisible there; Windows
-enforces the lock, so it surfaced immediately.
+**4. SQLite connections were not actually closing, and this only showed up on Windows.** I found this while running `demo/run_demo.py` on Windows. Its own cleanup step (`os.remove(db_path)`) failed with a `PermissionError` saying the file was in use by another process. The cause was that `AuditLog` and `StateStore` both used `with sqlite3.connect(...) as conn:`. That pattern is a common trap: Python's sqlite3 connection, used this way, commits or rolls back the transaction when the block ends, but it does not actually close the connection. The connection stayed open until Python's garbage collector eventually cleaned it up, and in the meantime it held a file lock. On Mac and Linux, you can delete a file even while something else has it open, so this problem was invisible there. Windows enforces the lock, so it showed up right away.
 
-Fix: both classes now use a small `@contextmanager` wrapper
-(`StateStore._connect`, and the equivalent in `AssessmentMemory` in the
-escalation-agent repo) that explicitly commits *and* closes in a `finally` block,
-so a connection can never outlive the `with` block regardless of exceptions.
-Regression tests (`tests/test_connection_cleanup.py`) assert the db file is
-immediately deletable after use -- the exact operation that failed originally.
+I fixed both classes to use a small `@contextmanager` wrapper that commits and then closes the connection in a `finally` block, so a connection can never stay open past its `with` block, even if something goes wrong. The tests in `tests/test_connection_cleanup.py` check that the database file can be deleted immediately after use, which is the exact thing that used to fail.
 
-This is left in as a case study, not smoothed over: it's a real example of a
-platform-specific bug that automated tests alone (all originally passing on
-Linux in CI) did not catch, and that only manual, cross-platform verification
-found. That's precisely the argument for the manual verification pass this
-project's roadmap insists on before any GitHub push.
+I am leaving this bug in the notes rather than quietly fixing it and moving on, because it is a good example of something that automated tests alone (all passing on Linux in CI) never caught. Only testing it by hand, on a different platform, found it. That is the whole reason I think manual verification matters before publishing anything.
 
-## v2.1: From direct import to a real service boundary (HTTP)
+## Version 2.1: moving from a direct code import to a real network connection
 
-The Phase 1 integration originally worked by loading escalation-agent's Python
-code directly in-process (see the "Four real bugs" section below for the full
-account of what that cost in practice: shared-venv dependency requirements, a
-`src`/`src` package name collision, and the two repos being unable to run on
-separate machines). This version replaces that with a real network boundary:
-`src/integrations/escalation_agent_http_worker.py` calls escalation-agent's
-REST API (`POST /triage/{ticket_key}`, `GET /tickets`) over HTTP, with retry
-and backoff on transient failures, exactly the way any two independently-owned
-services in a real company talk to each other.
+The first version of the connection to escalation-agent worked by loading its Python code directly into this process (see the bugs above for what that cost me in practice: needing the other repo's dependencies installed here too, the `src`/`src` name clash, and the two repos being stuck needing to live on the same machine). This version replaces that with a proper network boundary instead. `src/integrations/escalation_agent_http_worker.py` calls escalation-agent's own API (`POST /triage/{ticket_key}`, `GET /tickets`) over HTTP, with retries and backoff if something goes wrong temporarily. This is basically how any two separately owned services would talk to each other in a real company.
 
-**What this actually fixes, concretely:** agent-ops-manager's dependency list
-dropped `pandas`, `numpy`, `scikit-learn`, `chromadb`, `langchain-core`, and
-`langgraph` entirely -- it now needs nothing from escalation-agent except its
-network address (`ESCALATION_AGENT_URL`) and, if configured, an API key. Both
-services can run on different machines, be deployed independently, scale
-independently, and be owned by different teams without ever touching each
-other's code or environment. escalation-agent's API also gained its own
-authentication (`src/api/auth.py` in that repo) and now returns a clean 503 --
-not a raw 500 -- when it's misconfigured (e.g. missing its own API key),
-discovered and fixed during this same manual, live verification pass.
+**What this actually changes:** agent-ops-manager's dependency list no longer needs `pandas`, `numpy`, `scikit-learn`, `chromadb`, `langchain-core`, or `langgraph` at all. It only needs to know escalation-agent's network address (`ESCALATION_AGENT_URL`) and, if one is set, an API key. The two services can now run on different machines, be deployed separately, scaled separately, and owned by different teams, without ever touching each other's code. escalation-agent's own API also got its own authentication (`src/api/auth.py` in that repo), and it now returns a clean 503 instead of a raw, confusing 500 when it is misconfigured, for example when its own API key is missing. I found and fixed that while testing this connection live.
 
-**Trade-off, stated honestly:** this adds real operational overhead --
-both services must actually be running for the integration to work, versus
-one process doing everything. That's the correct trade-off here: the
-integration is meant to model a real multi-service platform, not minimize
-local dev friction. `is_escalation_agent_reachable()` and the retry/backoff
-logic exist specifically to make that overhead safe rather than silent.
+**A trade-off worth being honest about:** this adds real overhead. Both services now need to actually be running for anything to work, instead of one process doing everything. I think that trade-off is the right one here, since the whole point is to model a real multi-service setup, not to make local development as easy as possible. The `is_escalation_agent_reachable()` check and the retry logic exist specifically so that overhead fails safely and visibly, instead of quietly.
 
+## Version 2.0: persistence and authentication
 
-Version 2.0 responds to a deliberate production-readiness audit of v1. The three
-findings that mattered most, and their resolutions:
+This version came out of a deliberate review of how ready the first version really was for production use. Three things stood out.
 
-**1. State now survives restarts and is shared across processes.** In v1, agent
-profiles, pending approvals, and results lived in process memory -- restart meant
-amnesia, and the API and dashboard processes each held divergent state
-(split-brain). v2 introduces a write-through persistence layer
-(`src/core/state_store.py`, repository pattern over SQLite): every mutation is
-persisted inside the mutating call, and `register_agent` hydrates persisted state
-(earned autonomy, trust history, pause flag) over code defaults on startup --
-because earned trust must survive restarts; code-level defaults are only for
-first boot. Why SQLite and not Postgres: single-node platform, zero-ops, and the
-repository interface is the seam where Postgres slots in later -- swapping
-engines changes one file. Why no ORM: simple queries, small schema; SQLAlchemy
-would add indirection with no current benefit. Why write-through and not
-write-behind: simple, crash-safe, correct at this throughput.
+**1. State now survives a restart, and is shared across processes.** In the first version, agent profiles, pending approvals, and results only lived in memory while the process was running. Restarting meant losing all of it, and the API process and the dashboard process each kept their own separate, disagreeing copy of the state. I added a persistence layer (`src/core/state_store.py`, a repository pattern over SQLite) where every change is saved as it happens, and `register_agent` loads any saved state (earned autonomy, trust history, whether it is paused) instead of resetting to defaults, since trust that was earned should survive a restart. Code-level defaults are only meant for the very first time an agent is registered.
 
-**2. The API is authenticated with role scoping.** API keys with two RBAC roles
-(ADMIN: lifecycle + assignment; REVIEWER: read + approve/reject + feedback),
-constant-time key comparison, keys from environment variables. Why API keys and
-not JWT: this is a service/platform API, not a user session system -- Stripe,
-Anthropic, and OpenAI all authenticate their platform APIs with keys. JWT earns
-its complexity with multi-user sessions and an identity provider; adding it here
-would be resume-driven engineering. The upgrade path (token endpoint or SSO) is
-clear if multi-user arrives. Dev mode (no keys configured) still works but logs a
-prominent warning -- the demo stays runnable, and an unsecured deployment is loud
-about being unsecured rather than silently open.
+I chose SQLite over something like Postgres because this is a single-node project with no real infrastructure to manage, and the repository pattern is exactly the seam where Postgres could be swapped in later without touching anything above it. I skipped an ORM because the queries are simple and the schema is small, so something like SQLAlchemy would mostly add extra layers without much benefit right now. I chose to write to the database immediately rather than batching writes, since that is simpler and safer at this scale, even if it would not be the right choice at much higher volume.
 
-**3. Proper packaging.** `pyproject.toml` with pytest `pythonpath` config
-replaced the per-file `sys.path` hacks in tests. The API also gained explicit
-Pydantic response models (internal dataclasses no longer leak through the
-boundary via `__dict__`), locked-down CORS (deny-all unless `ALLOWED_ORIGINS` is
-set), structured application logging separate from the domain audit trail, and a
-trust-routed assignment mode (`POST /tasks/assign` without an `agent_id`).
+**2. The API now requires an API key, with two roles.** There is an ADMIN role (which can change agent settings and assign work) and a REVIEWER role (which can read data, approve or reject things, and give feedback), keys are compared in constant time, and keys come from environment variables. I chose plain API keys instead of JWT, since this is a service talking to other services, not a system with user logins. Companies like Stripe, Anthropic, and OpenAI all authenticate their platform APIs this way. JWT makes more sense once you have real user sessions and an identity provider, and adding it here without that need would just be complexity for its own sake. If a dev mode is running with no keys set, it still works, but it logs a clear warning, so an unsecured setup is loud about being unsecured rather than silently open.
 
+**3. Better packaging.** I added a `pyproject.toml` with pytest's `pythonpath` setting, which replaced the `sys.path` workarounds that used to be scattered across the test files. The API also got proper response models (so internal data structures are not directly exposed through `__dict__`), locked-down CORS settings (nothing is allowed unless `ALLOWED_ORIGINS` is explicitly set), separate structured logging from the audit trail, and a way to assign a task without picking the agent yourself, letting the system route it based on trust.
 
-## The core idea, and where it comes from
+## Where the core idea comes from
 
-This project operationalizes an idea that's currently circulating as engineering-
-leadership thought leadership (see e.g. the "manage AI agents like junior engineers"
-framing that gained traction in early 2026 — definition-of-done discipline, WIP
-limits, delegation ladders) rather than something invented from nothing here. What
-this repo contributes is a working implementation of that idea as actual
-infrastructure: a supervisor that enforces those principles in code, not just in a
-blog post. That distinction is deliberate — see the README for the fuller context.
+This project builds on an idea I saw circulating in engineering-leadership writing in early 2026: manage AI agents somewhat like you would manage a new engineer, with a defined scope, a clear definition of "done," and delegation that increases as trust is earned. I did not invent that idea. What I built is a working version of it, as actual running software rather than just a description. That distinction matters to me, and I try to explain the reasoning fully in the README rather than leaving it implied.
 
-## Why autonomy is a 5-level ladder, adjusted on a periodic review cycle
+## Why autonomy moves on a schedule, not after every task
 
-Autonomy (`AutonomyLevel`, `src/core/models.py`) determines whether a task needs
-human sign-off before execution. It's adjusted by `maybe_adjust_autonomy`
-(`src/core/policy.py`) only every `EVALUATION_WINDOW` (5) completed tasks, not
-after every single task.
+Autonomy (`AutonomyLevel` in `src/core/models.py`) controls whether a task needs a human's sign-off before it runs. It only gets reconsidered every 5 completed tasks (`EVALUATION_WINDOW` in `src/core/policy.py`), not after each individual one.
 
-The alternative — adjusting after every task — would cause an agent to bounce
-between autonomy levels after one good or bad result, which doesn't reflect how
-trust actually works and would make the audit log noisy and hard to reason about.
-A periodic cycle mirrors an actual performance-review cadence: enough data points
-to be a real signal, not a knee-jerk reaction to one outcome.
+I chose it this way because adjusting after every single task would make an agent's autonomy swing up and down after just one good or bad result, which does not really reflect how trust works in practice, and it would make the audit log noisy and hard to follow. Checking on a schedule is closer to how a real performance review works: enough data points to mean something, rather than reacting to one outcome.
 
-## Why quality checking is pluggable, and why the default is a heuristic, not an LLM
+## Why quality checking is swappable, and defaults to something simple
 
-Every task carries a mandatory `definition_of_done`, which is what makes automated
-scoring possible without a human reading every result. `HeuristicQualityChecker`
-(the default) is a fast, free, deterministic shape-check — it exists specifically so
-the supervisor's core logic (WIP limits, approval routing, promotion/demotion,
-escalation) can be fully unit-tested without an API key, which is also why the test
-suite in this repo needs no `ANTHROPIC_API_KEY` to pass. `LLMQualityChecker` is the
-production-grade option that actually judges whether output satisfies the
-definition of done — swap it in via the `quality_checker` argument to `Supervisor`.
+Every task has a required `definition_of_done`, which is what makes it possible to score results automatically without a person reading each one. The default, `HeuristicQualityChecker`, is fast, free, and predictable. It exists mainly so the supervisor's core logic (WIP limits, approval routing, promotion and demotion, escalation) can be fully tested without needing an API key, which is also why this repo's test suite does not need `ANTHROPIC_API_KEY` to pass. `LLMQualityChecker` is the option meant for real use. It actually judges whether the output meets the definition of done, and you can swap it in through the `quality_checker` argument on `Supervisor`.
 
-## Why the kill switch only blocks new task assignment
+## Why the kill switch only stops new work
 
-`Supervisor.pause_agent()` prevents an agent from being assigned any new task. It
-does **not** interrupt a task already mid-execution. This is a real, stated
-limitation, not an oversight: the current execution model is synchronous
-(`worker.run(task)` blocks until it returns), so there's no natural interruption
-point mid-call. A production version running agents as cancellable async tasks or
-separate processes could add true mid-execution termination; this repo's honest
-scope is "stops the bleeding immediately for all future work," which is still the
-majority of what the enterprise AI governance research this project responds to
-is actually asking for (the ability to stop an agent from taking further action).
+`Supervisor.pause_agent()` stops an agent from being given any new task. It does not stop a task that is already running. This is a real limitation that I want to state clearly rather than hide: the current setup runs tasks one at a time and waits for them to finish (`worker.run(task)` blocks until it returns), so there is no natural point to interrupt it partway through. A production version that ran agents as cancellable, asynchronous tasks could add true mid-task cancellation. What this repo does honestly is stop all future work immediately, which covers most of what the research on AI governance actually asks for: the ability to stop an agent from doing anything further.
 
-## Why post-hoc escalation exists even at high autonomy levels
+## Why a low-quality result can still get flagged, even at high autonomy
 
-A task can still end up `ESCALATED` even when the agent's autonomy level didn't
-require pre-approval (see `_execute` in `src/core/supervisor.py`): if the quality
-score comes back below `POST_HOC_ESCALATION_THRESHOLD`, the result is flagged for
-human review regardless of autonomy level. Autonomy controls *who reviews before
-execution*, not *whether bad results get caught at all* — a fully autonomous agent
-that produces a bad result still surfaces it, it just doesn't block on it first.
+A task can end up marked `ESCALATED` even if the agent's autonomy level did not require approval beforehand (see `_execute` in `src/core/supervisor.py`). If the quality score comes back below a threshold, the result gets flagged for a human to look at regardless of the autonomy level. Autonomy controls whether a human reviews something before it runs. It does not control whether a bad result gets caught at all. Even a fully autonomous agent that produces a bad result will surface it, it just will not have been blocked in advance.
 
-## Why the audit trail is SQLite, and is append-only
+## Why the audit trail is SQLite, and never gets edited or deleted from
 
-`AuditLog` (`src/core/audit.py`) uses SQLite directly rather than an ORM or a
-hosted database. For a portfolio-scale system this is the right footprint —
-zero setup, a real persistent file, fully queryable with SQL if needed — and the
-`INSERT`-only access pattern (no `UPDATE`/`DELETE` anywhere in this codebase) is
-what makes it a meaningful audit trail rather than just an event bus. A production
-deployment handling real compliance requirements would want an actually
-tamper-evident store (e.g. an append-only log with hash chaining, or a managed
-audit-log service); that's a genuine gap between this repo and a production system,
-stated plainly.
+`AuditLog` (`src/core/audit.py`) uses SQLite directly, rather than an ORM or a separately hosted database. For a project at this scale, that felt like the right amount of infrastructure: no setup required, a real file you can query with SQL if you need to. The code only ever inserts rows, and there is no `UPDATE` or `DELETE` anywhere in this codebase, which is what makes it a genuine audit trail rather than just a log of events that could be edited later. A real production deployment with real compliance needs would want something more tamper-evident, like an append-only log with hash chaining, or a managed audit service. I want to be upfront that this is a real gap between what is here and what a production system would need.
 
-## Why the Phase 1 integration is over HTTP, not a package dependency
+## Why escalation-agent is called over HTTP, not imported as a package
 
-`src/integrations/escalation_agent_http_worker.py` calls escalation-agent's own
-REST API rather than declaring it as an installable pip dependency or importing
-its code directly. See "v2.1: From direct import to a real service boundary"
-above for the full account, including the direct-import approach this replaced
-and exactly what broke because of it. Short version: this keeps both repos
-independently cloneable, runnable, deployable, and testable entirely on their
-own -- which matters both for two separate portfolio projects and for how real
-companies actually connect independently-owned services -- while still proving
-a real, live integration exists between them, not just a described one.
+`src/integrations/escalation_agent_http_worker.py` calls escalation-agent's own API rather than being installed as a dependency or having its code imported directly. See the "Version 2.1" section above for the fuller story, including what the earlier, direct-import approach cost me. The short version: this way, both repos can be cloned, run, deployed, and tested completely on their own. That matters both because they are two separate portfolio projects, and because it mirrors how real companies actually connect services that different teams own, while still proving a real, working connection exists between them rather than just describing one.
 
 ## Known limitations, stated plainly
 
-- The heuristic quality checker is intentionally shallow (see above) — it is a
-  testing and demo mechanism, not a real quality judge. `LLMQualityChecker` is the
-  one to use for anything that should actually reflect task quality.
-- The kill switch does not interrupt in-flight execution (see above).
-- The audit trail is not tamper-evident (no hash chaining / signing) — it's
-  append-only by convention (no delete/update code path exists), not by database-
-  level enforcement.
-- `EscalationAgentHTTPWorker` has been verified end-to-end against a real, live
-  escalation-agent instance running as its own process (not just unit-tested
-  against a mock) — retry/backoff, dynamic ticket fetching, and error handling
-  were all exercised against the real HTTP service during manual verification.
-  Not yet verified: a full triage run with a real `ANTHROPIC_API_KEY` configured
-  on escalation-agent's side, producing real (not config-error) risk assessments
-  through the governed pipeline end to end — that's the next manual check.
+- The default quality checker is intentionally simple (see above). It is meant for testing and demos, not as a real judge of quality. Use `LLMQualityChecker` for anything where quality actually needs to be judged properly.
+- The kill switch does not interrupt work that is already running (see above).
+- The audit trail is not tamper-evident. There is no hash chaining or signing. It is append-only by convention, since there is no code path that updates or deletes rows, not because the database enforces it.
+- `EscalationAgentHTTPWorker` has been tested against a real, live escalation-agent instance running as its own separate process, not just against a mock. The retries, the dynamic ticket fetching, and the error handling were all exercised against the real HTTP service while I was testing this by hand. What I have not yet verified is a full triage run with a real `ANTHROPIC_API_KEY` set on escalation-agent's side, producing real risk assessments (not just configuration errors) through the whole governed pipeline. That is the next thing to check by hand.
